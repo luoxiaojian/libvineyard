@@ -13,7 +13,7 @@ project(vineyard LANGUAGES C CXX VERSION ${VINEYARD_VERSION})
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 option(BUILD_VINEYARD_SERVER "Build vineyard's server" ON)
 option(BUILD_VINEYARD_CLIENT "Build vineyard's client" ON)
-option(BUILD_VINEYARD_PYTHON_BINDINGS "Build vineyard's python bindings" OFF)
+option(BUILD_VINEYARD_PYTHON_BINDINGS "Build vineyard's python bindings" ON)
 option(BUILD_VINEYARD_PYPI_PACKAGES "Build vineyard's python bindings" OFF)
 
 option(BUILD_VINEYARD_BASIC "Build vineyard's basic data structures" ON)
@@ -39,6 +39,10 @@ endif()
 if(BUILD_VINEYARD_GRAPH)
     set(BUILD_VINEYARD_BASIC ON)
     set(BUILD_VINEYARD_IO ON)
+endif()
+
+if(BUILD_VINEYARD_IO)
+    set(BUILD_VINEYARD_BASIC ON)
 endif()
 
 if(BUILD_VINEYARD_BASIC OR BUILD_VINEYARD_IO OR BUILD_VINEYARD_MIGRATION OR BUILD_VINEYARD_PYTHON_BINDINGS)
@@ -269,6 +273,7 @@ if(BUILD_VINEYARD_CLIENT)
     add_library(vineyard_client SHARED ${CLIENT_SRC_FILES})
     target_link_libraries(vineyard_client PUBLIC ${ARROW_SHARED_LIB}
                                                  ${GLOG_LIBRARIES}
+                                                 ${GFLAGS_LIBRARIES}
     )
     if(BUILD_SHARED_LIBS AND BUILD_VINEYARD_PYPI_PACKAGES)
         target_compile_options(vineyard_client PRIVATE -static-libgcc -static-libstdc++ -Os)
