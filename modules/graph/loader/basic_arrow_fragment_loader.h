@@ -143,9 +143,15 @@ class BasicArrowFragmentLoader {
                               "OID_T is not same with arrow::Column(" +
                                   id_column_type->ToString() + ")");
             }
+#if 0
             BOOST_LEAF_AUTO(tmp_table,
                             ShufflePropertyVertexTable<partitioner_t>(
                                 comm_spec_, partitioner_, vertex_table));
+#else
+            BOOST_LEAF_AUTO(tmp_table,
+                            beta::ShufflePropertyVertexTable<partitioner_t>(
+                                comm_spec_, partitioner_, vertex_table));
+#endif
             /**
              * Keep the oid column in vertex data table for HTAP, rather, we
              * record the id column name (primary key) in schema's metadata.
@@ -325,7 +331,7 @@ class BasicArrowFragmentLoader {
               processed_table_list[edge_table_index] = edge_table;
             }
             auto table = ConcatenateTables(processed_table_list);
-#if 1
+#if 0
             auto r = ShufflePropertyEdgeTable<vid_t>(
                 comm_spec_, id_parser, src_column_idx, dst_column_idx, table);
 #else
@@ -378,7 +384,7 @@ class BasicArrowFragmentLoader {
     size_t chunk_num = oid_arrays_in->num_chunks();
     std::vector<std::shared_ptr<arrow::Array>> chunks_out(chunk_num);
 
-#if 1
+#if 0
     for (size_t chunk_i = 0; chunk_i != chunk_num; ++chunk_i) {
       std::shared_ptr<oid_array_t> oid_array =
           std::dynamic_pointer_cast<oid_array_t>(oid_arrays_in->chunk(chunk_i));
@@ -425,7 +431,7 @@ class BasicArrowFragmentLoader {
               for (size_t k = 0; k != size; ++k) {
                 internal_oid_t oid = oid_array->GetView(k);
                 fid_t fid = partitioner_.GetPartitionId(oid_t(oid));
-                if (!oid2gid_mapper(fid, label, oid, builder[k])) {
+                if (!oid2gid_mapper(fid, label_id, oid, builder[k])) {
                   LOG(ERROR) << "Mapping vertex " << oid << " failed.";
                 }
               }

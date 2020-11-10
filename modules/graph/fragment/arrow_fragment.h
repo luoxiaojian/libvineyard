@@ -1416,6 +1416,57 @@ void parallel_for(const ITER_T& begin, const ITER_T& end, const FUNC_T& func,
   }
 }
 
+inline void parallel_prefix_sum(const int* input, int64_t* output,
+                                size_t length, int concurrency) {
+  size_t bsize =
+      std::max(static_cast<size_t>(1024),
+               static_cast<size_t>((length + concurrency - 1) / concurrency));
+  int thread_num = static_cast<int>((length + bsize - 1) / bsize);
+
+  auto block_prefix = [&](int i) {
+    size_t begin = std::min(static_cast<size_t>(i) * bsize, length);
+    size_t end = std::min(begin + bsize, length);
+    output[begin] = input[begin];
+    for (++begin; begin < end; ++begin) {
+      output[begin] = input[begin] + output[begin - 1];
+    }
+  };
+
+  std::vector<std::thread> threads_prefix;
+  for (int i = 0; i < thread_num; ++i) {
+    threads_prefix.emplace_back(block_prefix, i);
+  }
+  for (auto& thrd : threads_prefix) {
+    thrd.join();
+  }
+
+  std::vector<int64_t> block_sum(thread_num);
+  {
+    size_t end = std::min(bsize, length);
+    block_sum[0] = output[end - 1];
+  }
+  for (int i = 1; i < thread_num; ++i) {
+    size_t begin = std::min(static_cast<size_t>(i) * bsize + bsize, length);
+    block_sum[i] = block_sum[i - 1] + output[begin - 1];
+  }
+
+  auto block_add = [&](int i) {
+    size_t begin = std::min(static_cast<size_t>(i) * bsize, length);
+    size_t end = std::min(begin + bsize, length);
+    for (; begin < end; ++begin) {
+      output[begin] = output[begin] + block_sum[i - 1];
+    }
+  };
+
+  std::vector<std::thread> threads_sum;
+  for (int i = 1; i < thread_num; ++i) {
+    threads_sum.emplace_back(block_add, i);
+  }
+  for (auto& thrd : threads_sum) {
+    thrd.join();
+  }
+}
+
 template <typename OID_T, typename VID_T>
 class BasicArrowFragmentBuilder : public ArrowFragmentBuilder<OID_T, VID_T> {
   using oid_t = OID_T;
@@ -1645,7 +1696,7 @@ class BasicArrowFragmentBuilder : public ArrowFragmentBuilder<OID_T, VID_T> {
               builder[i] = ovg2l_maps_[vid_parser_.GetLabelId(gid)].at(gid);
             }
           },
-          concurrency, 1024);
+          concurrency);
       ARROW_OK_OR_RAISE(builder.Advance(length));
     }
     ARROW_OK_OR_RAISE(builder.Finish(&lid_list));
@@ -1783,15 +1834,14 @@ class BasicArrowFragmentBuilder : public ArrowFragmentBuilder<OID_T, VID_T> {
         ++degree[vid_parser_.GetLabelId(src_id)][vid_parser_.GetOffset(src_id)];
       }
     } else {
-      parallel_for(
-          static_cast<int64_t>(0), edge_num,
-          [&degree, this, src_list_ptr](int64_t i) {
-            vid_t src_id = src_list_ptr[i];
-            label_id_t label = vid_parser_.GetLabelId(src_id);
-            int64_t offset = vid_parser_.GetOffset(src_id);
-            grape::atomic_add(degree[label][offset], 1);
-          },
-          concurrency, 1024);
+      parallel_for(static_cast<int64_t>(0), edge_num,
+                   [&degree, this, src_list_ptr](int64_t i) {
+                     vid_t src_id = src_list_ptr[i];
+                     label_id_t label = vid_parser_.GetLabelId(src_id);
+                     int64_t offset = vid_parser_.GetOffset(src_id);
+                     grape::atomic_add(degree[label][offset], 1);
+                   },
+                   concurrency);
     }
 
     std::vector<std::vector<int64_t>> offsets(vertex_label_num_);
@@ -1800,13 +1850,24 @@ class BasicArrowFragmentBuilder : public ArrowFragmentBuilder<OID_T, VID_T> {
       offset_vec.resize(tvnums_[v_label] + 1);
       auto& degree_vec = degree[v_label];
       offset_vec[0] = 0;
-      for (vid_t i = 0; i < tvnums_[v_label]; ++i) {
-        offset_vec[i + 1] = offset_vec[i] + degree_vec[i];
-      }
-      actual_edge_num[v_label] = offset_vec[tvnums_[v_label]];
       arrow::Int64Builder builder;
-      ARROW_OK_OR_RAISE(builder.AppendValues(offset_vec));
+      if (concurrency == 1) {
+        for (vid_t i = 0; i < tvnums_[v_label]; ++i) {
+          offset_vec[i + 1] = offset_vec[i] + degree_vec[i];
+        }
+        ARROW_OK_OR_RAISE(builder.AppendValues(offset_vec));
+      } else {
+        parallel_prefix_sum(degree_vec.data(), &offset_vec[1], tvnums_[v_label],
+                            concurrency);
+        ARROW_OK_OR_RAISE(builder.Resize(tvnums_[v_label] + 1));
+        parallel_for(
+            static_cast<vid_t>(0), tvnums_[v_label] + 1,
+            [&offset_vec, &builder](vid_t i) { builder[i] = offset_vec[i]; },
+            concurrency);
+        ARROW_OK_OR_RAISE(builder.Advance(tvnums_[v_label] + 1));
+      }
       ARROW_OK_OR_RAISE(builder.Finish(&edge_offsets[v_label]));
+      actual_edge_num[v_label] = offset_vec[tvnums_[v_label]];
     }
 
     std::vector<vineyard::PodArrayBuilder<nbr_unit_t>> edge_builders(
@@ -1828,20 +1889,20 @@ class BasicArrowFragmentBuilder : public ArrowFragmentBuilder<OID_T, VID_T> {
         ++offsets[v_label][v_offset];
       }
     } else {
-      parallel_for(
-          static_cast<int64_t>(0), edge_num,
-          [src_list_ptr, dst_list_ptr, this, &edge_builders,
-           &offsets](int64_t i) {
-            vid_t src_id = src_list_ptr[i];
-            label_id_t v_label = vid_parser_.GetLabelId(src_id);
-            int64_t v_offset = vid_parser_.GetOffset(src_id);
-            int64_t adj_offset =
-                __sync_fetch_and_add(&offsets[v_label][v_offset], 1);
-            nbr_unit_t* ptr = edge_builders[v_label].MutablePointer(adj_offset);
-            ptr->vid = dst_list_ptr[i];
-            ptr->eid = static_cast<eid_t>(i);
-          },
-          concurrency, 1024);
+      parallel_for(static_cast<int64_t>(0), edge_num,
+                   [src_list_ptr, dst_list_ptr, this, &edge_builders,
+                    &offsets](int64_t i) {
+                     vid_t src_id = src_list_ptr[i];
+                     label_id_t v_label = vid_parser_.GetLabelId(src_id);
+                     int64_t v_offset = vid_parser_.GetOffset(src_id);
+                     int64_t adj_offset =
+                         __sync_fetch_and_add(&offsets[v_label][v_offset], 1);
+                     nbr_unit_t* ptr =
+                         edge_builders[v_label].MutablePointer(adj_offset);
+                     ptr->vid = dst_list_ptr[i];
+                     ptr->eid = static_cast<eid_t>(i);
+                   },
+                   concurrency);
     }
 
     for (label_id_t v_label = 0; v_label != vertex_label_num_; ++v_label) {
@@ -1861,7 +1922,7 @@ class BasicArrowFragmentBuilder : public ArrowFragmentBuilder<OID_T, VID_T> {
       } else {
         parallel_for(
             static_cast<vid_t>(0), tvnum,
-            [this, offsets_ptr, &builder](vid_t i) {
+            [offsets_ptr, &builder](vid_t i) {
               nbr_unit_t* begin = builder.MutablePointer(offsets_ptr[i]);
               nbr_unit_t* end = builder.MutablePointer(offsets_ptr[i + 1]);
               std::sort(begin, end,
@@ -1869,7 +1930,7 @@ class BasicArrowFragmentBuilder : public ArrowFragmentBuilder<OID_T, VID_T> {
                           return lhs.vid < rhs.vid;
                         });
             },
-            concurrency, 1024);
+            concurrency);
       }
       ARROW_OK_OR_RAISE(
           edge_builders[v_label].Advance(actual_edge_num[v_label]));
@@ -1901,19 +1962,18 @@ class BasicArrowFragmentBuilder : public ArrowFragmentBuilder<OID_T, VID_T> {
         ++degree[vid_parser_.GetLabelId(dst_id)][vid_parser_.GetOffset(dst_id)];
       }
     } else {
-      parallel_for(
-          static_cast<int64_t>(0), edge_num,
-          [&degree, this, src_list_ptr, dst_list_ptr](int64_t i) {
-            vid_t src_id = src_list_ptr[i];
-            vid_t dst_id = dst_list_ptr[i];
-            grape::atomic_add(degree[vid_parser_.GetLabelId(src_id)]
-                                    [vid_parser_.GetOffset(src_id)],
-                              1);
-            grape::atomic_add(degree[vid_parser_.GetLabelId(dst_id)]
-                                    [vid_parser_.GetOffset(dst_id)],
-                              1);
-          },
-          concurrency, 1024);
+      parallel_for(static_cast<int64_t>(0), edge_num,
+                   [&degree, this, src_list_ptr, dst_list_ptr](int64_t i) {
+                     vid_t src_id = src_list_ptr[i];
+                     vid_t dst_id = dst_list_ptr[i];
+                     grape::atomic_add(degree[vid_parser_.GetLabelId(src_id)]
+                                             [vid_parser_.GetOffset(src_id)],
+                                       1);
+                     grape::atomic_add(degree[vid_parser_.GetLabelId(dst_id)]
+                                             [vid_parser_.GetOffset(dst_id)],
+                                       1);
+                   },
+                   concurrency);
     }
 
     std::vector<std::vector<int64_t>> offsets(vertex_label_num_);
@@ -1922,13 +1982,24 @@ class BasicArrowFragmentBuilder : public ArrowFragmentBuilder<OID_T, VID_T> {
       offset_vec.resize(tvnums_[v_label] + 1);
       auto& degree_vec = degree[v_label];
       offset_vec[0] = 0;
-      for (vid_t i = 0; i < tvnums_[v_label]; ++i) {
-        offset_vec[i + 1] = offset_vec[i] + degree_vec[i];
-      }
-      actual_edge_num[v_label] = offset_vec[tvnums_[v_label]];
       arrow::Int64Builder builder;
-      ARROW_OK_OR_RAISE(builder.AppendValues(offset_vec));
+      if (concurrency == 1) {
+        for (vid_t i = 0; i < tvnums_[v_label]; ++i) {
+          offset_vec[i + 1] = offset_vec[i] + degree_vec[i];
+        }
+        ARROW_OK_OR_RAISE(builder.AppendValues(offset_vec));
+      } else {
+        parallel_prefix_sum(degree_vec.data(), &offset_vec[1], tvnums_[v_label],
+                            concurrency);
+        ARROW_OK_OR_RAISE(builder.Resize(tvnums_[v_label] + 1));
+        parallel_for(
+            static_cast<vid_t>(0), tvnums_[v_label] + 1,
+            [&offset_vec, &builder](vid_t i) { builder[i] = offset_vec[i]; },
+            concurrency);
+        ARROW_OK_OR_RAISE(builder.Advance(tvnums_[v_label] + 1));
+      }
       ARROW_OK_OR_RAISE(builder.Finish(&edge_offsets[v_label]));
+      actual_edge_num[v_label] = offset_vec[tvnums_[v_label]];
     }
 
     std::vector<vineyard::PodArrayBuilder<nbr_unit_t>> edge_builders(
@@ -1960,32 +2031,31 @@ class BasicArrowFragmentBuilder : public ArrowFragmentBuilder<OID_T, VID_T> {
         ++offsets[dst_label][dst_offset];
       }
     } else {
-      parallel_for(
-          static_cast<int64_t>(0), edge_num,
-          [src_list_ptr, dst_list_ptr, this, &edge_builders,
-           &offsets](int64_t i) {
-            vid_t src_id = src_list_ptr[i];
-            vid_t dst_id = dst_list_ptr[i];
-            label_id_t src_label = vid_parser_.GetLabelId(src_id);
-            int64_t src_offset = vid_parser_.GetOffset(src_id);
-            label_id_t dst_label = vid_parser_.GetLabelId(dst_id);
-            int64_t dst_offset = vid_parser_.GetOffset(dst_id);
+      parallel_for(static_cast<int64_t>(0), edge_num,
+                   [src_list_ptr, dst_list_ptr, this, &edge_builders,
+                    &offsets](int64_t i) {
+                     vid_t src_id = src_list_ptr[i];
+                     vid_t dst_id = dst_list_ptr[i];
+                     label_id_t src_label = vid_parser_.GetLabelId(src_id);
+                     int64_t src_offset = vid_parser_.GetOffset(src_id);
+                     label_id_t dst_label = vid_parser_.GetLabelId(dst_id);
+                     int64_t dst_offset = vid_parser_.GetOffset(dst_id);
 
-            int64_t oe_offset =
-                __sync_fetch_and_add(&offsets[src_label][src_offset], 1);
-            nbr_unit_t* src_ptr =
-                edge_builders[src_label].MutablePointer(oe_offset);
-            src_ptr->vid = dst_id;
-            src_ptr->eid = static_cast<eid_t>(i);
+                     int64_t oe_offset = __sync_fetch_and_add(
+                         &offsets[src_label][src_offset], 1);
+                     nbr_unit_t* src_ptr =
+                         edge_builders[src_label].MutablePointer(oe_offset);
+                     src_ptr->vid = dst_id;
+                     src_ptr->eid = static_cast<eid_t>(i);
 
-            int64_t ie_offset =
-                __sync_fetch_and_add(&offsets[dst_label][dst_offset], 1);
-            nbr_unit_t* dst_ptr =
-                edge_builders[dst_label].MutablePointer(ie_offset);
-            dst_ptr->vid = src_id;
-            dst_ptr->eid = static_cast<eid_t>(i);
-          },
-          concurrency, 1024);
+                     int64_t ie_offset = __sync_fetch_and_add(
+                         &offsets[dst_label][dst_offset], 1);
+                     nbr_unit_t* dst_ptr =
+                         edge_builders[dst_label].MutablePointer(ie_offset);
+                     dst_ptr->vid = src_id;
+                     dst_ptr->eid = static_cast<eid_t>(i);
+                   },
+                   concurrency);
     }
 
     for (label_id_t v_label = 0; v_label != vertex_label_num_; ++v_label) {
@@ -2005,7 +2075,7 @@ class BasicArrowFragmentBuilder : public ArrowFragmentBuilder<OID_T, VID_T> {
       } else {
         parallel_for(
             static_cast<vid_t>(0), tvnum,
-            [this, offsets_ptr, &builder](vid_t i) {
+            [offsets_ptr, &builder](vid_t i) {
               nbr_unit_t* begin = builder.MutablePointer(offsets_ptr[i]);
               nbr_unit_t* end = builder.MutablePointer(offsets_ptr[i + 1]);
               std::sort(begin, end,
@@ -2013,7 +2083,7 @@ class BasicArrowFragmentBuilder : public ArrowFragmentBuilder<OID_T, VID_T> {
                           return lhs.vid < rhs.vid;
                         });
             },
-            concurrency, 1024);
+            concurrency);
       }
       ARROW_OK_OR_RAISE(
           edge_builders[v_label].Advance(actual_edge_num[v_label]));
