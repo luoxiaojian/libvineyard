@@ -28,6 +28,7 @@ limitations under the License.
 #include "arrow/table.h"
 #include "arrow/table_builder.h"
 #include "arrow/util/config.h"
+#include "boost/leaf/all.hpp"
 #include "glog/logging.h"
 
 #include "grape/serialization/in_archive.h"
