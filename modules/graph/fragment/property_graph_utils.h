@@ -22,6 +22,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "arrow/builder.h"
 #include "boost/leaf/all.hpp"
 
 #include "grape/utils/vertex_array.h"
