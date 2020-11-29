@@ -166,7 +166,6 @@ class TableAppender {
   size_t col_num_;
 };
 
-
 const int chunk_size = 409600;
 
 template <typename T>
