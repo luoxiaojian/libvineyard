@@ -623,7 +623,7 @@ struct ConvertToArrowType<::grape::EmptyType> {
   static std::shared_ptr<arrow::DataType> TypeValue() { return arrow::null(); }
 };
 
-boost::leaf::result<std::shared_ptr<arrow::Schema>> TypeLoosen(
+inline boost::leaf::result<std::shared_ptr<arrow::Schema>> TypeLoosen(
     const std::vector<std::shared_ptr<arrow::Schema>>& schemas) {
   size_t field_num = 0;
   for (const auto& schema : schemas) {
@@ -678,28 +678,8 @@ boost::leaf::result<std::shared_ptr<arrow::Schema>> TypeLoosen(
   return std::make_shared<arrow::Schema>(lossen_fields);
 }
 
-boost::leaf::result<std::shared_ptr<arrow::Table>> SyncSchema(
-    const std::shared_ptr<arrow::Table>& table,
-    const grape::CommSpec& comm_spec) {
-  std::shared_ptr<arrow::Schema> local_schema =
-      table != nullptr ? table->schema() : nullptr;
-  std::vector<std::shared_ptr<arrow::Schema>> schemas;
-
-  GlobalAllGatherv(local_schema, schemas, comm_spec);
-  BOOST_LEAF_AUTO(normalized_schema, TypeLoosen(schemas));
-
-  if (table == nullptr) {
-    std::shared_ptr<arrow::Table> table_out;
-    VY_OK_OR_RAISE(
-        vineyard::EmptyTableBuilder::Build(normalized_schema, table_out));
-    return table_out;
-  } else {
-    return CastTableToSchema(table, normalized_schema);
-  }
-}
-
 // Inspired by arrow::compute::Cast
-boost::leaf::result<std::shared_ptr<arrow::Array>> CastIntToDouble(
+inline boost::leaf::result<std::shared_ptr<arrow::Array>> CastIntToDouble(
     const std::shared_ptr<arrow::Array>& in,
     const std::shared_ptr<arrow::DataType>& to_type) {
   CHECK_OR_RAISE(in->type()->Equals(arrow::int64()));
@@ -722,7 +702,7 @@ boost::leaf::result<std::shared_ptr<arrow::Array>> CastIntToDouble(
 // Timestamp value are stored as as number of seconds, milliseconds,
 // microseconds or nanoseconds since UNIX epoch.
 // CSV reader can only produce timestamp in seconds.
-boost::leaf::result<std::shared_ptr<arrow::Array>> CastDateToInt(
+inline boost::leaf::result<std::shared_ptr<arrow::Array>> CastDateToInt(
     const std::shared_ptr<arrow::Array>& in,
     const std::shared_ptr<arrow::DataType>& to_type) {
   CHECK_OR_RAISE(in->type()->Equals(arrow::timestamp(arrow::TimeUnit::SECOND)));
@@ -734,7 +714,7 @@ boost::leaf::result<std::shared_ptr<arrow::Array>> CastDateToInt(
   return out;
 }
 
-boost::leaf::result<std::shared_ptr<arrow::Array>> CastStringToBigString(
+inline boost::leaf::result<std::shared_ptr<arrow::Array>> CastStringToBigString(
     const std::shared_ptr<arrow::Array>& in,
     const std::shared_ptr<arrow::DataType>& to_type) {
   auto array_data = in->data()->Copy();
@@ -761,7 +741,7 @@ boost::leaf::result<std::shared_ptr<arrow::Array>> CastStringToBigString(
   return out;
 }
 
-boost::leaf::result<std::shared_ptr<arrow::Array>> CastNullToOthers(
+inline boost::leaf::result<std::shared_ptr<arrow::Array>> CastNullToOthers(
     const std::shared_ptr<arrow::Array>& in,
     const std::shared_ptr<arrow::DataType>& to_type) {
   std::unique_ptr<arrow::ArrayBuilder> builder;
@@ -774,7 +754,7 @@ boost::leaf::result<std::shared_ptr<arrow::Array>> CastNullToOthers(
   return out;
 }
 
-boost::leaf::result<std::shared_ptr<arrow::Table>> CastTableToSchema(
+inline boost::leaf::result<std::shared_ptr<arrow::Table>> CastTableToSchema(
     const std::shared_ptr<arrow::Table>& table,
     const std::shared_ptr<arrow::Schema>& schema) {
   if (table->schema()->Equals(schema)) {
@@ -821,6 +801,26 @@ boost::leaf::result<std::shared_ptr<arrow::Table>> CastTableToSchema(
     }
   }
   return arrow::Table::Make(schema, new_columns);
+}
+
+inline boost::leaf::result<std::shared_ptr<arrow::Table>> SyncSchema(
+    const std::shared_ptr<arrow::Table>& table,
+    const grape::CommSpec& comm_spec) {
+  std::shared_ptr<arrow::Schema> local_schema =
+      table != nullptr ? table->schema() : nullptr;
+  std::vector<std::shared_ptr<arrow::Schema>> schemas;
+
+  GlobalAllGatherv(local_schema, schemas, comm_spec);
+  BOOST_LEAF_AUTO(normalized_schema, TypeLoosen(schemas));
+
+  if (table == nullptr) {
+    std::shared_ptr<arrow::Table> table_out;
+    VY_OK_OR_RAISE(
+        vineyard::EmptyTableBuilder::Build(normalized_schema, table_out));
+    return table_out;
+  } else {
+    return CastTableToSchema(table, normalized_schema);
+  }
 }
 
 }  // namespace vineyard
