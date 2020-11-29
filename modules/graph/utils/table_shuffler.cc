@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#include "modules/graph/utils/table_shuffler.h"
+#include "graph/utils/table_shuffler.h"
 
 namespace vineyard {
 
