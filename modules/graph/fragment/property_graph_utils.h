@@ -25,9 +25,11 @@ limitations under the License.
 #include "boost/leaf/all.hpp"
 
 #include "grape/utils/vertex_array.h"
+#include "grape/worker/comm_spec.h"
 
 #include "graph/fragment/property_graph_types.h"
-#include "graph/fragment/property_graph_utils.h"
+#include "graph/utils/error.h"
+#include "graph/utils/mpi_utils.h"
 
 namespace vineyard {
 
@@ -620,6 +622,61 @@ struct ConvertToArrowType<::grape::EmptyType> {
   using ArrayType = EmptyArray;
   static std::shared_ptr<arrow::DataType> TypeValue() { return arrow::null(); }
 };
+
+boost::leaf::result<std::shared_ptr<arrow::Schema>> TypeLoosen(
+    const std::vector<std::shared_ptr<arrow::Schema>>& schemas) {
+  size_t field_num = 0;
+  for (const auto& schema : schemas) {
+    if (schema != nullptr) {
+      field_num = schema->num_fields();
+      break;
+    }
+  }
+  if (field_num == 0) {
+    RETURN_GS_ERROR(ErrorCode::kInvalidOperationError, "Every schema is empty");
+  }
+  // Perform type lossen.
+  // timestamp -> int64 -> double -> utf8   binary (not supported)
+  std::vector<std::vector<std::shared_ptr<arrow::Field>>> fields(field_num);
+  for (size_t i = 0; i < field_num; ++i) {
+    for (const auto& schema : schemas) {
+      if (schema != nullptr) {
+        fields[i].push_back(schema->field(i));
+      }
+    }
+  }
+  std::vector<std::shared_ptr<arrow::Field>> lossen_fields(field_num);
+
+  for (size_t i = 0; i < field_num; ++i) {
+    lossen_fields[i] = fields[i][0];
+    if (fields[i][0]->type() == arrow::null()) {
+      continue;
+    }
+    auto res = fields[i][0]->type();
+    if (res->Equals(arrow::timestamp(arrow::TimeUnit::SECOND))) {
+      res = arrow::int64();
+    }
+    if (res->Equals(arrow::int64())) {
+      for (size_t j = 1; j < fields[i].size(); ++j) {
+        if (fields[i][j]->type()->Equals(arrow::float64())) {
+          res = arrow::float64();
+        }
+      }
+    }
+    if (res->Equals(arrow::float64())) {
+      for (size_t j = 1; j < fields[i].size(); ++j) {
+        if (fields[i][j]->type()->Equals(arrow::utf8())) {
+          res = arrow::utf8();
+        }
+      }
+    }
+    if (res->Equals(arrow::utf8())) {
+      res = arrow::large_utf8();
+    }
+    lossen_fields[i] = lossen_fields[i]->WithType(res);
+  }
+  return std::make_shared<arrow::Schema>(lossen_fields);
+}
 
 boost::leaf::result<std::shared_ptr<arrow::Table>> SyncSchema(
     const std::shared_ptr<arrow::Table>& table,
