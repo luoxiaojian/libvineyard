@@ -30,6 +30,9 @@ limitations under the License.
 #include "arrow/util/config.h"
 #include "glog/logging.h"
 
+#include "grape/serialization/in_archive.h"
+#include "grape/serialization/out_archive.h"
+
 #include "basic/ds/types.h"
 #include "common/util/status.h"
 
@@ -133,100 +136,6 @@ class PodArrayBuilder : public arrow::FixedSizeBinaryBuilder {
   }
 };
 
-bool SameShape(std::shared_ptr<arrow::ChunkedArray> ca1,
-               std::shared_ptr<arrow::ChunkedArray> ca2);
-
-template <typename ARRAY_TYPE, typename FUNC_TYPE>
-Status IterateDualChunkedArray(std::shared_ptr<arrow::ChunkedArray> ca1,
-                               std::shared_ptr<arrow::ChunkedArray> ca2,
-                               const FUNC_TYPE& func) {
-  VINEYARD_ASSERT(SameShape(ca1, ca2),
-                  "Two chunked arrays have different shapes");
-  size_t chunk_num = ca1->num_chunks();
-  size_t index = 0;
-  for (size_t chunk_i = 0; chunk_i != chunk_num; ++chunk_i) {
-    std::shared_ptr<ARRAY_TYPE> a1 =
-        std::dynamic_pointer_cast<ARRAY_TYPE>(ca1->chunk(chunk_i));
-    std::shared_ptr<ARRAY_TYPE> a2 =
-        std::dynamic_pointer_cast<ARRAY_TYPE>(ca2->chunk(chunk_i));
-    size_t len = a1->length();
-    for (size_t i = 0; i != len; ++i) {
-      func(a1->GetView(i), a2->GetView(i), index++);
-    }
-  }
-  return Status::OK();
-}
-
-template <typename ARRAY_TYPE, typename FUNC_TYPE>
-inline Status IterateChunkedArray(std::shared_ptr<arrow::ChunkedArray> ca,
-                                  const FUNC_TYPE& func) {
-  size_t chunk_num = ca->num_chunks();
-  size_t index = 0;
-  for (size_t chunk_i = 0; chunk_i != chunk_num; ++chunk_i) {
-    std::shared_ptr<ARRAY_TYPE> a =
-        std::dynamic_pointer_cast<ARRAY_TYPE>(ca->chunk(chunk_i));
-    size_t len = a->length();
-    for (size_t i = 0; i != len; ++i) {
-      func(a->GetView(i), index++);
-    }
-  }
-  return Status::OK();
-}
-
-/**
- * @brief The base representation of columns in vineyard
- *
- */
-class Column {
- public:
-  Column(std::shared_ptr<arrow::ChunkedArray> chunked_array, size_t chunk_size)
-      : chunked_array_(chunked_array), chunk_size_(chunk_size) {}
-  virtual ~Column() {}
-
-  std::shared_ptr<arrow::DataType> Type() const {
-    return chunked_array_->type();
-  }
-
-  size_t Length() const { return chunked_array_->length(); }
-
- protected:
-  std::shared_ptr<arrow::ChunkedArray> chunked_array_;
-  size_t chunk_size_;
-};
-
-/**
- * @brief The representation of concrete columns in vineyard
- *
- * @tparam T
- */
-template <typename T>
-class ConcreteColumn : public Column {
-  using array_type = typename ConvertToArrowType<T>::ArrayType;
-
- public:
-  ConcreteColumn(std::shared_ptr<arrow::ChunkedArray> chunked_array,
-                 size_t chunk_size)
-      : Column(chunked_array, chunk_size) {}
-
-  T GetView(size_t index) {
-    std::shared_ptr<array_type> chunk = std::dynamic_pointer_cast<array_type>(
-        Column::chunked_array_->chunk(index / Column::chunk_size_));
-    return chunk->GetView(index % Column::chunk_size_);
-  }
-};
-
-using Int64Column = ConcreteColumn<int64_t>;
-using Int32Column = ConcreteColumn<int32_t>;
-using UInt64Column = ConcreteColumn<uint64_t>;
-using UInt32Column = ConcreteColumn<uint32_t>;
-using FloatColumn = ConcreteColumn<float>;
-using DoubleColumn = ConcreteColumn<double>;
-using StringColumn = ConcreteColumn<RefString>;
-using TimestampColumn = ConcreteColumn<arrow::TimestampType>;
-
-std::shared_ptr<Column> CreateColumn(
-    std::shared_ptr<arrow::ChunkedArray> chunked_array, size_t chunk_size);
-
 /**
  * Similar to arrow's `GetRecordBatchSize`, but considering the schema.
  *
@@ -310,130 +219,6 @@ struct EmptyTableBuilder {
   }
 };
 
-template <typename T>
-struct AppendHelper {
-  static Status append(arrow::ArrayBuilder* builder,
-                       std::shared_ptr<arrow::Array> array, size_t offset) {
-    return Status::NotImplemented("Unimplemented for type: " +
-                                  array->type()->ToString());
-  }
-};
-
-template <>
-struct AppendHelper<uint64_t> {
-  static Status append(arrow::ArrayBuilder* builder,
-                       std::shared_ptr<arrow::Array> array, size_t offset) {
-    RETURN_ON_ARROW_ERROR(dynamic_cast<arrow::UInt64Builder*>(builder)->Append(
-        std::dynamic_pointer_cast<arrow::UInt64Array>(array)->GetView(offset)));
-    return Status::OK();
-  }
-};
-
-template <>
-struct AppendHelper<int64_t> {
-  static Status append(arrow::ArrayBuilder* builder,
-                       std::shared_ptr<arrow::Array> array, size_t offset) {
-    RETURN_ON_ARROW_ERROR(dynamic_cast<arrow::Int64Builder*>(builder)->Append(
-        std::dynamic_pointer_cast<arrow::Int64Array>(array)->GetView(offset)));
-    return Status::OK();
-  }
-};
-
-template <>
-struct AppendHelper<uint32_t> {
-  static Status append(arrow::ArrayBuilder* builder,
-                       std::shared_ptr<arrow::Array> array, size_t offset) {
-    RETURN_ON_ARROW_ERROR(dynamic_cast<arrow::UInt32Builder*>(builder)->Append(
-        std::dynamic_pointer_cast<arrow::UInt32Array>(array)->GetView(offset)));
-    return Status::OK();
-  }
-};
-
-template <>
-struct AppendHelper<int32_t> {
-  static Status append(arrow::ArrayBuilder* builder,
-                       std::shared_ptr<arrow::Array> array, size_t offset) {
-    RETURN_ON_ARROW_ERROR(dynamic_cast<arrow::Int32Builder*>(builder)->Append(
-        std::dynamic_pointer_cast<arrow::Int32Array>(array)->GetView(offset)));
-    return Status::OK();
-  }
-};
-
-template <>
-struct AppendHelper<float> {
-  static Status append(arrow::ArrayBuilder* builder,
-                       std::shared_ptr<arrow::Array> array, size_t offset) {
-    RETURN_ON_ARROW_ERROR(dynamic_cast<arrow::FloatBuilder*>(builder)->Append(
-        std::dynamic_pointer_cast<arrow::FloatArray>(array)->GetView(offset)));
-    return Status::OK();
-  }
-};
-
-template <>
-struct AppendHelper<double> {
-  static Status append(arrow::ArrayBuilder* builder,
-                       std::shared_ptr<arrow::Array> array, size_t offset) {
-    RETURN_ON_ARROW_ERROR(dynamic_cast<arrow::DoubleBuilder*>(builder)->Append(
-        std::dynamic_pointer_cast<arrow::DoubleArray>(array)->GetView(offset)));
-    return Status::OK();
-  }
-};
-
-template <>
-struct AppendHelper<std::string> {
-  static Status append(arrow::ArrayBuilder* builder,
-                       std::shared_ptr<arrow::Array> array, size_t offset) {
-    RETURN_ON_ARROW_ERROR(dynamic_cast<arrow::BinaryBuilder*>(builder)->Append(
-        std::dynamic_pointer_cast<arrow::BinaryArray>(array)->GetView(offset)));
-    return Status::OK();
-  }
-};
-
-template <>
-struct AppendHelper<arrow::TimestampType> {
-  static Status append(arrow::ArrayBuilder* builder,
-                       std::shared_ptr<arrow::Array> array, size_t offset) {
-    RETURN_ON_ARROW_ERROR(
-        dynamic_cast<arrow::TimestampBuilder*>(builder)->Append(
-            std::dynamic_pointer_cast<arrow::TimestampArray>(array)->GetView(
-                offset)));
-    return Status::OK();
-  }
-};
-
-template <>
-struct AppendHelper<void> {
-  static Status append(arrow::ArrayBuilder* builder,
-                       std::shared_ptr<arrow::Array> array, size_t offset) {
-    RETURN_ON_ARROW_ERROR(
-        dynamic_cast<arrow::NullBuilder*>(builder)->Append(nullptr));
-    return Status::OK();
-  }
-};
-
-typedef Status (*appender_func)(arrow::ArrayBuilder*,
-                                std::shared_ptr<arrow::Array>, size_t);
-
-/**
- * @brief TableAppender supports the append operation for tables in vineyard
- *
- */
-class TableAppender {
- public:
-  explicit TableAppender(std::shared_ptr<arrow::Schema> schema);
-
-  Status Apply(std::unique_ptr<arrow::RecordBatchBuilder>& builder,
-               std::shared_ptr<arrow::RecordBatch> batch, size_t offset,
-               std::vector<std::shared_ptr<arrow::RecordBatch>>& batches_out);
-
-  Status Flush(std::unique_ptr<arrow::RecordBatchBuilder>& builder,
-               std::vector<std::shared_ptr<arrow::RecordBatch>>& batches_out);
-
- private:
-  std::vector<appender_func> funcs_;
-  size_t col_num_;
-};
-
 /**
  * @brief Concatenate multiple arrow tables into one.
  */
@@ -479,6 +264,191 @@ inline std::shared_ptr<arrow::DataType> type_name_to_arrow_type(
   }
 }
 
+boost::leaf::result<std::shared_ptr<arrow::Table>> SyncSchema(
+    const std::shared_ptr<arrow::Table>& table,
+    const grape::CommSpec& comm_spec) {
+  std::shared_ptr<arrow::Schema> local_schema =
+      table != nullptr ? table->schema() : nullptr;
+  std::vector<std::shared_ptr<arrow::Schema>> schemas;
+
+  GlobalAllGatherv(local_schema, schemas, comm_spec);
+  BOOST_LEAF_AUTO(normalized_schema, TypeLoosen(schemas));
+
+  if (table == nullptr) {
+    std::shared_ptr<arrow::Table> table_out;
+    VY_OK_OR_RAISE(
+        vineyard::EmptyTableBuilder::Build(normalized_schema, table_out));
+    return table_out;
+  } else {
+    return CastTableToSchema(table, normalized_schema);
+  }
+}
+
+// Inspired by arrow::compute::Cast
+boost::leaf::result<std::shared_ptr<arrow::Array>> CastIntToDouble(
+    const std::shared_ptr<arrow::Array>& in,
+    const std::shared_ptr<arrow::DataType>& to_type) {
+  CHECK_OR_RAISE(in->type()->Equals(arrow::int64()));
+  CHECK_OR_RAISE(to_type->Equals(arrow::float64()));
+  using in_type = int64_t;
+  using out_type = double;
+  auto in_data = in->data()->GetValues<in_type>(1);
+  std::vector<out_type> out_data(in->length());
+  for (int64_t i = 0; i < in->length(); ++i) {
+    out_data[i] = static_cast<out_type>(*in_data++);
+  }
+  arrow::DoubleBuilder builder;
+  ARROW_OK_OR_RAISE(builder.AppendValues(out_data));
+  std::shared_ptr<arrow::Array> out;
+  ARROW_OK_OR_RAISE(builder.Finish(&out));
+  ARROW_OK_OR_RAISE(out->ValidateFull());
+  return out;
+}
+
+// Timestamp value are stored as as number of seconds, milliseconds,
+// microseconds or nanoseconds since UNIX epoch.
+// CSV reader can only produce timestamp in seconds.
+boost::leaf::result<std::shared_ptr<arrow::Array>> CastDateToInt(
+    const std::shared_ptr<arrow::Array>& in,
+    const std::shared_ptr<arrow::DataType>& to_type) {
+  CHECK_OR_RAISE(in->type()->Equals(arrow::timestamp(arrow::TimeUnit::SECOND)));
+  CHECK_OR_RAISE(to_type->Equals(arrow::int64()));
+  auto array_data = in->data()->Copy();
+  array_data->type = to_type;
+  auto out = arrow::MakeArray(array_data);
+  ARROW_OK_OR_RAISE(out->ValidateFull());
+  return out;
+}
+
+boost::leaf::result<std::shared_ptr<arrow::Array>> CastStringToBigString(
+    const std::shared_ptr<arrow::Array>& in,
+    const std::shared_ptr<arrow::DataType>& to_type) {
+  auto array_data = in->data()->Copy();
+  auto offset = array_data->buffers[1];
+  using from_offset_type = typename arrow::StringArray::offset_type;
+  using to_string_offset_type = typename arrow::LargeStringArray::offset_type;
+  auto raw_value_offsets_ =
+      offset == NULLPTR
+          ? NULLPTR
+          : reinterpret_cast<const from_offset_type*>(offset->data());
+  std::vector<to_string_offset_type> to_offset(offset->size() /
+                                               sizeof(from_offset_type));
+  for (size_t i = 0; i < to_offset.size(); ++i) {
+    to_offset[i] = raw_value_offsets_[i];
+  }
+  std::shared_ptr<arrow::Buffer> buffer;
+  arrow::TypedBufferBuilder<to_string_offset_type> buffer_builder;
+  buffer_builder.Append(to_offset.data(), to_offset.size());
+  buffer_builder.Finish(&buffer);
+  array_data->type = to_type;
+  array_data->buffers[1] = buffer;
+  auto out = arrow::MakeArray(array_data);
+  ARROW_OK_OR_RAISE(out->ValidateFull());
+  return out;
+}
+
+boost::leaf::result<std::shared_ptr<arrow::Array>> CastNullToOthers(
+    const std::shared_ptr<arrow::Array>& in,
+    const std::shared_ptr<arrow::DataType>& to_type) {
+  std::unique_ptr<arrow::ArrayBuilder> builder;
+  ARROW_OK_OR_RAISE(
+      arrow::MakeBuilder(arrow::default_memory_pool(), to_type, &builder));
+  ARROW_OK_OR_RAISE(builder->AppendNulls(in->length()));
+  std::shared_ptr<arrow::Array> out;
+  ARROW_OK_OR_RAISE(builder->Finish(&out));
+  ARROW_OK_OR_RAISE(out->ValidateFull());
+  return out;
+}
+
+boost::leaf::result<std::shared_ptr<arrow::Table>> CastTableToSchema(
+    const std::shared_ptr<arrow::Table>& table,
+    const std::shared_ptr<arrow::Schema>& schema) {
+  if (table->schema()->Equals(schema)) {
+    return table;
+  }
+  CHECK_OR_RAISE(table->num_columns() == schema->num_fields());
+  std::vector<std::shared_ptr<arrow::ChunkedArray>> new_columns;
+  for (int64_t i = 0; i < table->num_columns(); ++i) {
+    auto col = table->column(i);
+    if (!table->field(i)->type()->Equals(schema->field(i)->type())) {
+      auto from_type = table->field(i)->type();
+      auto to_type = schema->field(i)->type();
+      std::vector<std::shared_ptr<arrow::Array>> chunks;
+      for (int64_t j = 0; j < col->num_chunks(); ++j) {
+        auto array = col->chunk(j);
+        if (from_type->Equals(arrow::int64()) &&
+            to_type->Equals(arrow::float64())) {
+          BOOST_LEAF_AUTO(new_array, CastIntToDouble(array, to_type));
+          chunks.push_back(new_array);
+        } else if (from_type->Equals(
+                       arrow::timestamp(arrow::TimeUnit::SECOND)) &&
+                   to_type->Equals(arrow::int64())) {
+          BOOST_LEAF_AUTO(new_array, CastDateToInt(array, to_type));
+          chunks.push_back(new_array);
+        } else if (from_type->Equals(arrow::utf8()) &&
+                   to_type->Equals(arrow::large_utf8())) {
+          BOOST_LEAF_AUTO(new_array, CastStringToBigString(array, to_type));
+          chunks.push_back(new_array);
+        } else if (from_type->Equals(arrow::null())) {
+          BOOST_LEAF_AUTO(new_array, CastNullToOthers(array, to_type));
+          chunks.push_back(new_array);
+        } else {
+          RETURN_GS_ERROR(ErrorCode::kDataTypeError,
+                          "Unexpected type: " + to_type->ToString() +
+                              "; Origin type: " + from_type->ToString());
+        }
+        VLOG(2) << "Cast " << from_type->ToString() << " To "
+                << to_type->ToString();
+      }
+      auto chunk_array = std::make_shared<arrow::ChunkedArray>(chunks, to_type);
+      new_columns.push_back(chunk_array);
+    } else {
+      new_columns.push_back(col);
+    }
+  }
+  return arrow::Table::Make(schema, new_columns);
+}
+
 }  // namespace vineyard
+
+namespace grape {
+inline grape::InArchive& operator<<(grape::InArchive& in_archive,
+                                    std::shared_ptr<arrow::Schema>& schema) {
+  if (schema != nullptr) {
+    std::shared_ptr<arrow::Buffer> out;
+#if defined(ARROW_VERSION) && ARROW_VERSION < 17000
+    CHECK_ARROW_ERROR(arrow::ipc::SerializeSchema(
+        *schema, nullptr, arrow::default_memory_pool(), &out));
+#elif defined(ARROW_VERSION) && ARROW_VERSION < 2000000
+    CHECK_ARROW_ERROR_AND_ASSIGN(
+        out, arrow::ipc::SerializeSchema(*schema, nullptr,
+                                         arrow::default_memory_pool()));
+#else
+    CHECK_ARROW_ERROR_AND_ASSIGN(
+        out,
+        arrow::ipc::SerializeSchema(*schema, arrow::default_memory_pool()));
+#endif
+    in_archive.AddBytes(out->data(), out->size());
+  }
+  return in_archive;
+}
+
+inline grape::OutArchive& operator>>(grape::OutArchive& out_archive,
+                                     std::shared_ptr<arrow::Schema>& schema) {
+  if (!out_archive.Empty()) {
+    auto buffer = std::make_shared<arrow::Buffer>(
+        reinterpret_cast<const uint8_t*>(out_archive.GetBuffer()),
+        out_archive.GetSize());
+    arrow::io::BufferReader reader(buffer);
+#if defined(ARROW_VERSION) && ARROW_VERSION < 17000
+    CHECK_ARROW_ERROR(arrow::ipc::ReadSchema(&reader, nullptr, &schema));
+#else
+    CHECK_ARROW_ERROR_AND_ASSIGN(schema,
+                                 arrow::ipc::ReadSchema(&reader, nullptr));
+#endif
+  }
+  return out_archive;
+}
+}  // namespace grape
 
 #endif  // MODULES_BASIC_DS_ARROW_UTILS_H_
