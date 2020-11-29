@@ -14,11 +14,6 @@ endif()
 
 file(GLOB_RECURSE BASIC_SRC_FILES "${CMAKE_CURRENT_SOURCE_DIR}" "*.cc")
 
-# boost::leaf for error_handling
-add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/boost-leaf"
-                 "${CMAKE_CURRENT_BINARY_DIR}/thirdparty/boost-leaf"
-)
-
 add_library(vineyard_basic ${BASIC_SRC_FILES})
 target_link_libraries(vineyard_basic vineyard_client
                                      ${ARROW_SHARED_LIB}
