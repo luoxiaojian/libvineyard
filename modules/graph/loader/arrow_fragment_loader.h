@@ -43,6 +43,7 @@ limitations under the License.
 #include "graph/fragment/property_graph_types.h"
 #include "graph/fragment/property_graph_utils.h"
 #include "graph/loader/basic_arrow_fragment_loader.h"
+#include "graph/loader/basic_ev_fragment_loader.h"
 #include "graph/utils/error.h"
 #include "graph/utils/partitioner.h"
 #include "graph/utils/thread_group.h"
@@ -96,11 +97,8 @@ class ArrowFragmentLoader {
         comm_spec_(comm_spec),
         efiles_(efiles),
         vfiles_(vfiles),
-        vertex_label_num_(vfiles.size()),
-        edge_label_num_(efiles.size()),
         directed_(directed),
-        generate_eid_(generate_eid),
-        basic_arrow_fragment_loader_(comm_spec) {}
+        generate_eid_(generate_eid) {}
 
   ArrowFragmentLoader(vineyard::Client& client,
                       const grape::CommSpec& comm_spec,
@@ -112,25 +110,21 @@ class ArrowFragmentLoader {
         v_streams_(vstreams),
         e_streams_(estreams),
         directed_(directed),
-        generate_eid_(generate_eid),
-        basic_arrow_fragment_loader_(comm_spec) {}
+        generate_eid_(generate_eid) {}
 
+#if 0
   ArrowFragmentLoader(
       vineyard::Client& client, const grape::CommSpec& comm_spec,
-      label_id_t vertex_label_num, label_id_t edge_label_num,
       std::vector<std::shared_ptr<arrow::Table>> const& partial_v_tables,
       std::vector<std::vector<std::shared_ptr<arrow::Table>>> const&
           partial_e_tables,
       bool directed = true, bool generate_eid = false)
       : client_(client),
         comm_spec_(comm_spec),
-        vertex_label_num_(vertex_label_num),
-        edge_label_num_(edge_label_num),
         partial_v_tables_(partial_v_tables),
         partial_e_tables_(partial_e_tables),
         directed_(directed),
-        generate_eid_(generate_eid),
-        basic_arrow_fragment_loader_(comm_spec) {}
+        generate_eid_(generate_eid) {}
 
   ArrowFragmentLoader(vineyard::Client& client,
                       const grape::CommSpec& comm_spec,
@@ -145,6 +139,7 @@ class ArrowFragmentLoader {
         directed_(directed),
         generate_eid_(generate_eid),
         basic_arrow_fragment_loader_(comm_spec) {}
+#endif
 
   ~ArrowFragmentLoader() = default;
 
@@ -158,29 +153,88 @@ class ArrowFragmentLoader {
     VLOG(2) << "initPartitioner uses " << (init_partitioner_ts - start_ts)
             << " seconds";
 #endif
-    BOOST_LEAF_CHECK(initBasicLoader());
-#if defined(WITH_PROFILING)
-    double init_basic_loader_ts = GetCurrentTime();
-    VLOG(2) << "initBasicLoader uses "
-            << (init_basic_loader_ts - init_partitioner_ts) << " seconds";
-#endif
-    BOOST_LEAF_AUTO(frag_id, shuffleAndBuild());
-#if defined(WITH_PROFILING)
-    double shuffle_and_build_ts = GetCurrentTime();
-    VLOG(2) << "shuffleAndBuild uses "
-            << (shuffle_and_build_ts - init_basic_loader_ts) << " seconds";
-    VLOG(2) << "[worker-" << comm_spec_.worker_id()
-            << "] load fragments use: " << (shuffle_and_build_ts - start_ts)
-            << " seconds";
-#endif
-    return frag_id;
+
+    std::vector<std::shared_ptr<arrow::Table>> partial_v_tables;
+    std::vector<std::vector<std::shared_ptr<arrow::Table>>> partial_e_tables;
+    if (!v_streams_.empty() && !e_streams_.empty()) {
+      {
+        BOOST_LEAF_AUTO(tmp, gatherVTables(client_, v_streams_));
+        partial_v_tables = tmp;
+      }
+      {
+        BOOST_LEAF_AUTO(tmp, gatherETables(client_, e_streams_));
+        partial_e_tables = tmp;
+      }
+    } else if (!vfiles_.empty() && !efiles_.empty()) {
+      auto load_v_procedure = [&]() {
+        return loadVertexTables(vfiles_, comm_spec_.worker_id(),
+                                comm_spec_.worker_num());
+      };
+      BOOST_LEAF_AUTO(tmp_v, sync_gs_error(comm_spec_, load_v_procedure));
+      partial_v_tables = tmp_v;
+      auto load_e_procedure = [&]() {
+        return loadEdgeTables(efiles_, comm_spec_.worker_id(),
+                              comm_spec_.worker_num());
+      };
+      BOOST_LEAF_AUTO(tmp_e, sync_gs_error(comm_spec_, load_e_procedure));
+      partial_e_tables = tmp_e;
+    } else {
+      LOG(FATAL) << "Unsupported...";
+    }
+
+    if (generate_eid_) {
+      generateEdgeId(partial_e_tables);
+    }
+
+    std::shared_ptr<BasicEVFragmentLoader<OID_T, VID_T, partitioner_t>>
+        basic_fragment_loader = std::make_shared<
+            BasicEVFragmentLoader<OID_T, VID_T, partitioner_t>>(
+            client_, comm_spec_, partitioner_, directed_, true);
+
+    for (auto table : partial_v_tables) {
+      auto meta = table->schema()->metadata();
+      int label_meta_index = meta->FindKey(LABEL_TAG);
+      std::string label_name = meta->value(label_meta_index);
+      BOOST_LEAF_CHECK(
+          basic_fragment_loader->AddVertexTable(label_name, table));
+    }
+
+    partial_v_tables.clear();
+
+    BOOST_LEAF_CHECK(basic_fragment_loader->ConstructVertices());
+
+    for (auto& table_vec : partial_e_tables) {
+      for (auto table : table_vec) {
+        auto meta = table->schema()->metadata();
+        int label_meta_index = meta->FindKey(LABEL_TAG);
+        std::string label_name = meta->value(label_meta_index);
+        int src_label_meta_index = meta->FindKey(SRC_LABEL_TAG);
+        std::string src_label_name = meta->value(src_label_meta_index);
+        int dst_label_meta_index = meta->FindKey(DST_LABEL_TAG);
+        std::string dst_label_name = meta->value(dst_label_meta_index);
+        BOOST_LEAF_CHECK(basic_fragment_loader->AddEdgeTable(
+            src_label_name, dst_label_name, label_name, table));
+      }
+    }
+
+    partial_e_tables.clear();
+
+    BOOST_LEAF_CHECK(basic_fragment_loader->ConstructEdges());
+
+    return basic_fragment_loader->ConstructFragment();
   }
 
   boost::leaf::result<vineyard::ObjectID> LoadFragmentAsFragmentGroup() {
     BOOST_LEAF_AUTO(frag_id, LoadFragment());
+    auto frag = std::dynamic_pointer_cast<ArrowFragment<OID_T, VID_T>>(
+        client.GetObject(frag_id));
+
+    label_id_t vertex_label_num = frag->vertex_label_num();
+    label_id_t edge_label_num = frag->edge_label_num();
+
     BOOST_LEAF_AUTO(group_id,
                     constructFragmentGroup(client_, frag_id, comm_spec_,
-                                           vertex_label_num_, edge_label_num_));
+                                           vertex_label_num, edge_label_num));
     return group_id;
   }
 
@@ -223,6 +277,7 @@ class ArrowFragmentLoader {
     return {};
   }
 
+#if 0
   boost::leaf::result<void> initBasicLoader() {
     std::vector<std::shared_ptr<arrow::Table>> partial_v_tables;
     std::vector<std::vector<std::shared_ptr<arrow::Table>>> partial_e_tables;
@@ -291,6 +346,7 @@ class ArrowFragmentLoader {
 
     return {};
   }
+#endif
 
   boost::leaf::result<void> generateEdgeId(
       std::vector<std::vector<std::shared_ptr<arrow::Table>>>& edge_tables) {
@@ -337,6 +393,7 @@ class ArrowFragmentLoader {
     return {};
   }
 
+#if 0
   boost::leaf::result<vineyard::ObjectID> shuffleAndBuild() {
 #if defined(WITH_PROFILING)
     auto start_ts = GetCurrentTime();
@@ -478,6 +535,7 @@ class ArrowFragmentLoader {
 #endif
     return frag->id();
   }
+#endif
 
   boost::leaf::result<vineyard::ObjectID> constructFragmentGroup(
       vineyard::Client& client, vineyard::ObjectID frag_id,
@@ -529,6 +587,7 @@ class ArrowFragmentLoader {
     return group_object_id;
   }
 
+#if 0
   boost::leaf::result<std::vector<std::shared_ptr<arrow::Table>>>
   loadVertexTables(const std::vector<std::string>& files, int index,
                    int total_parts) {
@@ -1210,27 +1269,28 @@ class ArrowFragmentLoader {
 #endif
     return arrow::Status::OK();
   }
+#endif
 
-  std::map<std::string, label_id_t> vertex_label_to_index_;
-  std::map<std::string, label_id_t> edge_label_to_index_;
-  std::map<std::string, std::set<std::pair<std::string, std::string>>>
-      edge_vertex_label_;
+  // std::map<std::string, label_id_t> vertex_label_to_index_;
+  // std::map<std::string, label_id_t> edge_label_to_index_;
+  // std::map<std::string, std::set<std::pair<std::string, std::string>>>
+  // edge_vertex_label_;
 
   vineyard::Client& client_;
   grape::CommSpec comm_spec_;
   std::vector<std::string> efiles_, vfiles_;
-  bool possible_duplicate_oid = false;
+  // bool possible_duplicate_oid = false;
 
-  label_id_t vertex_label_num_, edge_label_num_;
+  // label_id_t vertex_label_num_, edge_label_num_;
   std::vector<vineyard::ObjectID> v_streams_;
   std::vector<std::vector<vineyard::ObjectID>> e_streams_;
-  std::vector<std::shared_ptr<arrow::Table>> partial_v_tables_;
-  std::vector<std::vector<std::shared_ptr<arrow::Table>>> partial_e_tables_;
+  // std::vector<std::shared_ptr<arrow::Table>> partial_v_tables_;
+  // std::vector<std::vector<std::shared_ptr<arrow::Table>>> partial_e_tables_;
   partitioner_t partitioner_;
 
   bool directed_;
   bool generate_eid_;
-  basic_loader_t basic_arrow_fragment_loader_;
+  // basic_loader_t basic_arrow_fragment_loader_;
   std::function<void(vineyard::LocalIOAdaptor*)> io_deleter_ =
       [](vineyard::LocalIOAdaptor* adaptor) {
         VINEYARD_CHECK_OK(adaptor->Close());

@@ -44,10 +44,11 @@ class BasicEVFragmentLoader {
   explicit BasicEVFragmentLoader(Client& client,
                                  const grape::CommSpec& comm_spec,
                                  const PARTITIONER_T& partitioner,
-                                 bool retain_oid = false)
+                                 bool directed = true, bool retain_oid = false)
       : client_(client),
         comm_spec_(comm_spec),
         partitioner_(partitioner),
+        directed_(directed),
         retain_oid_(retain_oid) {}
 
   /**
@@ -313,7 +314,7 @@ class BasicEVFragmentLoader {
     return {};
   }
 
-  vineyard::ObjectID ConstructFragment() {
+  boost::leaf::result<vineyard::ObjectID> ConstructFragment() {
     BasicArrowFragmentBuilder<oid_t, vid_t> frag_builder(client_, vm_ptr_);
 
     PropertyGraphSchema schema;
@@ -468,6 +469,7 @@ class BasicEVFragmentLoader {
   grape::CommSpec comm_spec_;
   PARTITIONER_T partitioner_;
 
+  bool directed_;
   bool retain_oid_;
 
   std::map<std::string, label_id_t> vertex_label_to_index_;
