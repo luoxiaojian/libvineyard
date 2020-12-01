@@ -138,10 +138,17 @@ int main(int argc, char** argv) {
   MPI_Barrier(MPI_COMM_WORLD);
   double t = -GetCurrentTime();
   {
+#if 0
     auto loader =
         std::make_unique<ArrowFragmentLoader<property_graph_types::OID_TYPE,
                                              property_graph_types::VID_TYPE>>(
             client, comm_spec, efiles, vfiles, directed != 0);
+#else
+    auto loader =
+        std::make_unique<ArrowFragmentLoader<property_graph_types::OID_TYPE,
+                                             property_graph_types::VID_TYPE>>(
+            client, comm_spec, efiles, {}, directed != 0);
+#endif
     fragment_id = boost::leaf::try_handle_all(
         [&loader]() { return loader->LoadFragment(); },
         [](const GSError& e) {

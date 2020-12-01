@@ -156,6 +156,7 @@ class ArrowFragmentLoader {
 
     std::vector<std::shared_ptr<arrow::Table>> partial_v_tables;
     std::vector<std::vector<std::shared_ptr<arrow::Table>>> partial_e_tables;
+    bool load_with_ve;
     if (!v_streams_.empty() && !e_streams_.empty()) {
       {
         BOOST_LEAF_AUTO(tmp, gatherVTables(client_, v_streams_));
@@ -165,6 +166,7 @@ class ArrowFragmentLoader {
         BOOST_LEAF_AUTO(tmp, gatherETables(client_, e_streams_));
         partial_e_tables = tmp;
       }
+      load_with_ve = true;
     } else if (!vfiles_.empty() && !efiles_.empty()) {
       auto load_v_procedure = [&]() {
         return loadVertexTables(vfiles_, comm_spec_.worker_id(),
@@ -178,6 +180,15 @@ class ArrowFragmentLoader {
       };
       BOOST_LEAF_AUTO(tmp_e, sync_gs_error(comm_spec_, load_e_procedure));
       partial_e_tables = tmp_e;
+      load_with_ve = true;
+    } else if (vfiles_.empty() && !efiles_.empty()) {
+      auto load_e_procedure = [&]() {
+        return loadEdgeTables(efiles_, comm_spec_.worker_id(),
+                              comm_spec_.worker_num());
+      };
+      BOOST_LEAF_AUTO(tmp_e, sync_gs_error(comm_spec_, load_e_procedure));
+      partial_e_tables = tmp_e;
+      load_with_ve = true;
     } else {
       LOG(FATAL) << "Unsupported...";
     }
@@ -186,42 +197,71 @@ class ArrowFragmentLoader {
       generateEdgeId(partial_e_tables);
     }
 
-    std::shared_ptr<BasicEVFragmentLoader<OID_T, VID_T, partitioner_t>>
-        basic_fragment_loader = std::make_shared<
-            BasicEVFragmentLoader<OID_T, VID_T, partitioner_t>>(
-            client_, comm_spec_, partitioner_, directed_, true);
+    if (load_with_ve) {
+      std::shared_ptr<BasicEVFragmentLoader<OID_T, VID_T, partitioner_t>>
+          basic_fragment_loader = std::make_shared<
+              BasicEVFragmentLoader<OID_T, VID_T, partitioner_t>>(
+              client_, comm_spec_, partitioner_, directed_, true);
 
-    for (auto table : partial_v_tables) {
-      auto meta = table->schema()->metadata();
-      int label_meta_index = meta->FindKey(LABEL_TAG);
-      std::string label_name = meta->value(label_meta_index);
-      BOOST_LEAF_CHECK(
-          basic_fragment_loader->AddVertexTable(label_name, table));
-    }
-
-    partial_v_tables.clear();
-
-    BOOST_LEAF_CHECK(basic_fragment_loader->ConstructVertices());
-
-    for (auto& table_vec : partial_e_tables) {
-      for (auto table : table_vec) {
+      for (auto table : partial_v_tables) {
         auto meta = table->schema()->metadata();
         int label_meta_index = meta->FindKey(LABEL_TAG);
         std::string label_name = meta->value(label_meta_index);
-        int src_label_meta_index = meta->FindKey(SRC_LABEL_TAG);
-        std::string src_label_name = meta->value(src_label_meta_index);
-        int dst_label_meta_index = meta->FindKey(DST_LABEL_TAG);
-        std::string dst_label_name = meta->value(dst_label_meta_index);
-        BOOST_LEAF_CHECK(basic_fragment_loader->AddEdgeTable(
-            src_label_name, dst_label_name, label_name, table));
+        BOOST_LEAF_CHECK(
+            basic_fragment_loader->AddVertexTable(label_name, table));
       }
+
+      partial_v_tables.clear();
+
+      BOOST_LEAF_CHECK(basic_fragment_loader->ConstructVertices());
+
+      for (auto& table_vec : partial_e_tables) {
+        for (auto table : table_vec) {
+          auto meta = table->schema()->metadata();
+          int label_meta_index = meta->FindKey(LABEL_TAG);
+          std::string label_name = meta->value(label_meta_index);
+          int src_label_meta_index = meta->FindKey(SRC_LABEL_TAG);
+          std::string src_label_name = meta->value(src_label_meta_index);
+          int dst_label_meta_index = meta->FindKey(DST_LABEL_TAG);
+          std::string dst_label_name = meta->value(dst_label_meta_index);
+          BOOST_LEAF_CHECK(basic_fragment_loader->AddEdgeTable(
+              src_label_name, dst_label_name, label_name, table));
+        }
+      }
+
+      partial_e_tables.clear();
+
+      BOOST_LEAF_CHECK(basic_fragment_loader->ConstructEdges());
+
+      return basic_fragment_loader->ConstructFragment();
+    } else {
+      std::shared_ptr<BasicEFragmentLoader<OID_T, VID_T, partitioner_t>>
+          basic_fragment_loader = std::make_shared<
+              BasicEFragmentLoader<OID_T, VID_T, partitioner_t>>(
+              client_, comm_spec_, partitioner_, directed_, true);
+
+      BOOST_LEAF_CHECK(basic_fragment_loader->ConstructVertices());
+
+      for (auto& table_vec : partial_e_tables) {
+        for (auto table : table_vec) {
+          auto meta = table->schema()->metadata();
+          int label_meta_index = meta->FindKey(LABEL_TAG);
+          std::string label_name = meta->value(label_meta_index);
+          int src_label_meta_index = meta->FindKey(SRC_LABEL_TAG);
+          std::string src_label_name = meta->value(src_label_meta_index);
+          int dst_label_meta_index = meta->FindKey(DST_LABEL_TAG);
+          std::string dst_label_name = meta->value(dst_label_meta_index);
+          BOOST_LEAF_CHECK(basic_fragment_loader->AddEdgeTable(
+              src_label_name, dst_label_name, label_name, table));
+        }
+      }
+
+      partial_e_tables.clear();
+
+      BOOST_LEAF_CHECK(basic_fragment_loader->ConstructEdges());
+
+      return basic_fragment_loader->ConstructFragment();
     }
-
-    partial_e_tables.clear();
-
-    BOOST_LEAF_CHECK(basic_fragment_loader->ConstructEdges());
-
-    return basic_fragment_loader->ConstructFragment();
   }
 
   boost::leaf::result<vineyard::ObjectID> LoadFragmentAsFragmentGroup() {
