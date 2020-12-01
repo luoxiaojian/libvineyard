@@ -958,6 +958,7 @@ class ArrowFragmentLoader {
     table = vineyard::ConcatenateTables(tables);
     return Status::OK();
   }
+#endif
 
   Status readRecordBatchesFromVineyard(
       vineyard::Client& client, const ObjectID object_id,
@@ -1007,7 +1008,6 @@ class ArrowFragmentLoader {
                      "This worker doesn't receive any streams");
     return Status::OK();
   }
-#endif
 
   Status rebuildVTableMetadata(label_id_t label_id,
                                std::shared_ptr<arrow::Table> table,

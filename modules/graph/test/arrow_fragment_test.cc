@@ -127,6 +127,8 @@ int main(int argc, char** argv) {
   LOG(INFO) << "Connected to IPCServer: " << ipc_socket;
 
   grape::InitMPIComm();
+
+  {
   grape::CommSpec comm_spec;
   comm_spec.Init(MPI_COMM_WORLD);
 
@@ -204,6 +206,7 @@ int main(int argc, char** argv) {
   }
 #endif
 
+  }
   grape::FinalizeMPIComm();
 
   LOG(INFO) << "Passed arrow fragment test...";

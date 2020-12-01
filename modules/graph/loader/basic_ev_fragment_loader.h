@@ -31,7 +31,7 @@ template <typename OID_T, typename VID_T, typename PARTITIONER_T>
 class BasicEVFragmentLoader {
   static constexpr int id_column = 0;
   static constexpr int src_column = 0;
-  static constexpr int dst_column = 0;
+  static constexpr int dst_column = 1;
 
   using label_id_t = property_graph_types::LABEL_ID_TYPE;
   using oid_t = OID_T;
@@ -152,6 +152,7 @@ class BasicEVFragmentLoader {
         return tmp_table;
       };
       BOOST_LEAF_AUTO(table, sync_gs_error(comm_spec_, shuffle_procedure));
+      output_vertex_tables_[v_label] = table;
     }
 
     BasicArrowVertexMapBuilder<internal_oid_t, vid_t> vm_builder(
@@ -230,7 +231,7 @@ class BasicEVFragmentLoader {
     edge_label_num_ = cur_label;
 
     ordered_edge_tables_.clear();
-    ordered_edge_tables_.resize(vertex_label_num_);
+    ordered_edge_tables_.resize(edge_label_num_);
 
     for (auto& pair : input_edge_tables_) {
       ordered_edge_tables_[edge_label_to_index_[pair.first]] =
@@ -256,6 +257,7 @@ class BasicEVFragmentLoader {
       }
     }
 
+    output_edge_tables_.resize(edge_label_num_);
     for (label_id_t e_label = 0; e_label < edge_label_num_; ++e_label) {
       auto shuffle_procedure =
           [&]() -> boost::leaf::result<std::shared_ptr<arrow::Table>> {
@@ -318,6 +320,7 @@ class BasicEVFragmentLoader {
       };
 
       BOOST_LEAF_AUTO(table, sync_gs_error(comm_spec_, shuffle_procedure));
+      output_edge_tables_[e_label] = table;
       ordered_edge_tables_[e_label].clear();
     }
     ordered_edge_tables_.clear();
@@ -464,6 +467,7 @@ class BasicEVFragmentLoader {
       }
 
       auto table = output_edge_tables_[e_label];
+
       for (int i = 2; i < table->num_columns(); ++i) {
         entry->AddProperty(table->schema()->field(i)->name(),
                            table->schema()->field(i)->type());
@@ -477,7 +481,7 @@ class BasicEVFragmentLoader {
   label_id_t edge_label_num_;
 
   grape::CommSpec comm_spec_;
-  PARTITIONER_T partitioner_;
+  const PARTITIONER_T& partitioner_;
 
   bool directed_;
   bool retain_oid_;
