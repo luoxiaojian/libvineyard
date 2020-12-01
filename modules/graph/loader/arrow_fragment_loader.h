@@ -227,7 +227,7 @@ class ArrowFragmentLoader {
   boost::leaf::result<vineyard::ObjectID> LoadFragmentAsFragmentGroup() {
     BOOST_LEAF_AUTO(frag_id, LoadFragment());
     auto frag = std::dynamic_pointer_cast<ArrowFragment<OID_T, VID_T>>(
-        client.GetObject(frag_id));
+        client_.GetObject(frag_id));
 
     label_id_t vertex_label_num = frag->vertex_label_num();
     label_id_t edge_label_num = frag->edge_label_num();
@@ -351,8 +351,9 @@ class ArrowFragmentLoader {
   boost::leaf::result<void> generateEdgeId(
       std::vector<std::vector<std::shared_ptr<arrow::Table>>>& edge_tables) {
     IdParser<uint64_t> eid_parser;
-    eid_parser.Init(comm_spec_.fnum(), edge_label_num_);
-    for (label_id_t e_label = 0; e_label < edge_label_num_; ++e_label) {
+    label_id_t edge_label_num = edge_tables.size();
+    eid_parser.Init(comm_spec_.fnum(), edge_label_num);
+    for (label_id_t e_label = 0; e_label < edge_label_num; ++e_label) {
       auto& edge_table_list = edge_tables[e_label];
       uint64_t cur_id = eid_parser.GenerateId(comm_spec_.fid(), e_label, 0);
       for (size_t edge_table_index = 0;
@@ -587,7 +588,6 @@ class ArrowFragmentLoader {
     return group_object_id;
   }
 
-#if 0
   boost::leaf::result<std::vector<std::shared_ptr<arrow::Table>>>
   loadVertexTables(const std::vector<std::string>& files, int index,
                    int total_parts) {
@@ -756,6 +756,7 @@ class ArrowFragmentLoader {
     return tables;
   }
 
+#if 0
   boost::leaf::result<
       std::pair<std::vector<std::shared_ptr<arrow::Table>>,
                 std::vector<std::vector<std::shared_ptr<arrow::Table>>>>>
@@ -1039,6 +1040,7 @@ class ArrowFragmentLoader {
                      "This worker doesn't receive any streams");
     return Status::OK();
   }
+#endif
 
   Status rebuildVTableMetadata(label_id_t label_id,
                                std::shared_ptr<arrow::Table> table,
@@ -1240,6 +1242,8 @@ class ArrowFragmentLoader {
     }
     return tables;
   }
+
+#if 0
 
   arrow::Status swapColumn(std::shared_ptr<arrow::Table> in, int lhs_index,
                            int rhs_index, std::shared_ptr<arrow::Table>* out) {

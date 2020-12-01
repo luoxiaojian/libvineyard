@@ -199,6 +199,16 @@ class BasicEVFragmentLoader {
   }
 
   boost::leaf::result<void> ConstructEdges() {
+    vineyard::IdParser<vid_t> id_parser;
+    std::shared_ptr<arrow::Field> src_gid_field =
+        std::make_shared<arrow::Field>(
+            "src", vineyard::ConvertToArrowType<vid_t>::TypeValue());
+    std::shared_ptr<arrow::Field> dst_gid_field =
+        std::make_shared<arrow::Field>(
+            "dst", vineyard::ConvertToArrowType<vid_t>::TypeValue());
+
+    id_parser.Init(comm_spec_.fnum(), vertex_label_num_);
+
     std::vector<std::string> input_edge_labels;
     for (auto& pair : input_edge_tables_) {
       input_edge_labels.push_back(pair.first);
@@ -326,8 +336,8 @@ class BasicEVFragmentLoader {
         comm_spec_.local_num();
 
     BOOST_LEAF_CHECK(frag_builder.Init(
-        comm_spec_.fid(), comm_spec_.fnum(), std::move(local_v_tables),
-        std::move(local_e_tables), directed_, thread_num));
+        comm_spec_.fid(), comm_spec_.fnum(), std::move(output_vertex_tables_),
+        std::move(output_edge_tables_), directed_, thread_num));
 
     auto frag = std::dynamic_pointer_cast<ArrowFragment<oid_t, vid_t>>(
         frag_builder.Seal(client_));
