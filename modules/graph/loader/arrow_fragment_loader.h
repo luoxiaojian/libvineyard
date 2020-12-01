@@ -621,9 +621,6 @@ class ArrowFragmentLoader {
 
       auto meta = std::make_shared<arrow::KeyValueMetadata>();
 
-      meta->Append("type", "VERTEX");
-      meta->Append(basic_loader_t::ID_COLUMN, std::to_string(id_column));
-
       auto adaptor_meta = io_adaptor->GetMeta();
       // Check if label name is in meta
       if (adaptor_meta.find(LABEL_TAG) == adaptor_meta.end()) {
@@ -634,23 +631,12 @@ class ArrowFragmentLoader {
       auto v_label_name = adaptor_meta.find(LABEL_TAG)->second;
 
 #if defined(ARROW_VERSION) && ARROW_VERSION < 17000
-      std::unordered_map<std::string, std::string> metakv;
-      meta->ToUnorderedMap(&metakv);
-      for (auto const& kv : adaptor_meta) {
-        metakv[kv.first] = kv.second;
-      }
-      meta = std::make_shared<arrow::KeyValueMetadata>();
-      for (auto const& kv : metakv) {
-        meta->Append(kv.first, kv.second);
-      }
+      meta->Append(LABEL_TAG, v_label_name);
 #else
-      for (auto const& kv : adaptor_meta) {
-        CHECK_ARROW_ERROR(meta->Set(kv.first, kv.second));
-      }
+      CHECK_ARROW_ERROR(meta->Set(LABEL_TAG, v_label_name));
 #endif
 
       tables[label_id] = normalized_table->ReplaceSchemaMetadata(meta);
-      vertex_label_to_index_[v_label_name] = label_id;
     }
     return tables;
   }
@@ -691,10 +677,6 @@ class ArrowFragmentLoader {
 
           std::shared_ptr<arrow::KeyValueMetadata> meta(
               new arrow::KeyValueMetadata());
-          meta->Append("type", "EDGE");
-          meta->Append(basic_loader_t::SRC_COLUMN, std::to_string(src_column));
-          meta->Append(basic_loader_t::DST_COLUMN, std::to_string(dst_column));
-          meta->Append("sub_label_num", std::to_string(sub_label_files.size()));
 
           auto adaptor_meta = io_adaptor->GetMeta();
           auto it = adaptor_meta.find(LABEL_TAG);
@@ -722,32 +704,17 @@ class ArrowFragmentLoader {
           std::string dst_label_name = it->second;
 
 #if defined(ARROW_VERSION) && ARROW_VERSION < 17000
-          std::unordered_map<std::string, std::string> metakv;
-          meta->ToUnorderedMap(&metakv);
-          metakv[LABEL_TAG] = edge_label_name;
-          metakv[basic_loader_t::SRC_LABEL_ID] =
-              std::to_string(vertex_label_to_index_.at(src_label_name));
-          metakv[basic_loader_t::DST_LABEL_ID] =
-              std::to_string(vertex_label_to_index_.at(dst_label_name));
-          meta = std::make_shared<arrow::KeyValueMetadata>();
-          for (auto const& kv : metakv) {
-            meta->Append(kv.first, kv.second);
-          }
+          meta->Append(LABEL_TAG, edge_label_name);
+          meta->Append(SRC_LABEL_TAG, src_label_name);
+          meta->Append(DST_LABEL_TAG, dst_label_name);
 #else
           CHECK_ARROW_ERROR(meta->Set(LABEL_TAG, edge_label_name));
-          CHECK_ARROW_ERROR(meta->Set(
-              basic_loader_t::SRC_LABEL_ID,
-              std::to_string(vertex_label_to_index_.at(src_label_name))));
-          CHECK_ARROW_ERROR(meta->Set(
-              basic_loader_t::DST_LABEL_ID,
-              std::to_string(vertex_label_to_index_.at(dst_label_name))));
+          CHECK_ARROW_ERROR(meta->Set(SRC_LABEL_TAG, src_label_name));
+          CHECK_ARROW_ERROR(meta->Set(DST_LABEL_TAG, dst_label_name));
 #endif
 
           tables[label_id].emplace_back(
               normalized_table->ReplaceSchemaMetadata(meta));
-          edge_vertex_label_[edge_label_name].insert(
-              std::make_pair(src_label_name, dst_label_name));
-          edge_label_to_index_[edge_label_name] = label_id;
         }
       }
     } catch (std::exception& e) {
@@ -1051,14 +1018,11 @@ class ArrowFragmentLoader {
     } else {
       meta.reset(new arrow::KeyValueMetadata());
     }
-    meta->Append("type", "VERTEX");
-    meta->Append(basic_loader_t::ID_COLUMN, std::to_string(id_column));
 
     int label_meta_index = meta->FindKey(LABEL_TAG);
     RETURN_ON_ASSERT(
         label_meta_index != -1,
         "Metadata of input vertex files should contain label name");
-    vertex_label_to_index_[meta->value(label_meta_index)] = label_id;
 
     target = table->ReplaceSchemaMetadata(meta);
     return Status::OK();
@@ -1073,52 +1037,20 @@ class ArrowFragmentLoader {
     } else {
       meta.reset(new arrow::KeyValueMetadata());
     }
-    meta->Append("type", "EDGE");
-    meta->Append(basic_loader_t::SRC_COLUMN, std::to_string(src_column));
-    meta->Append(basic_loader_t::DST_COLUMN, std::to_string(dst_column));
-    meta->Append("sub_label_num", std::to_string(subtable_size));
 
     int label_meta_index = meta->FindKey(LABEL_TAG);
     RETURN_ON_ASSERT(label_meta_index != -1,
                      "Metadata of input edge files should contain label name");
-    std::string edge_label_name = meta->value(label_meta_index);
 
     int src_label_meta_index = meta->FindKey(SRC_LABEL_TAG);
     RETURN_ON_ASSERT(
         src_label_meta_index != -1,
         "Metadata of input edge files should contain src_label name");
-    std::string src_label_name = meta->value(src_label_meta_index);
 
     int dst_label_meta_index = meta->FindKey(DST_LABEL_TAG);
     RETURN_ON_ASSERT(
         dst_label_meta_index != -1,
         "Metadata of input edge files should contain dst_label name");
-    std::string dst_label_name = meta->value(dst_label_meta_index);
-
-#if defined(ARROW_VERSION) && ARROW_VERSION < 17000
-    std::unordered_map<std::string, std::string> metakv;
-    meta->ToUnorderedMap(&metakv);
-    metakv[LABEL_TAG] = edge_label_name;
-    metakv[basic_loader_t::SRC_LABEL_ID] =
-        std::to_string(vertex_label_to_index_.at(src_label_name));
-    metakv[basic_loader_t::DST_LABEL_ID] =
-        std::to_string(vertex_label_to_index_.at(dst_label_name));
-    meta = std::make_shared<arrow::KeyValueMetadata>();
-    for (auto const& kv : metakv) {
-      meta->Append(kv.first, kv.second);
-    }
-#else
-    RETURN_ON_ARROW_ERROR(
-        meta->Set(basic_loader_t::SRC_LABEL_ID,
-                  std::to_string(vertex_label_to_index_.at(src_label_name))));
-    RETURN_ON_ARROW_ERROR(
-        meta->Set(basic_loader_t::DST_LABEL_ID,
-                  std::to_string(vertex_label_to_index_.at(dst_label_name))));
-#endif
-
-    edge_vertex_label_[edge_label_name].insert(
-        std::make_pair(src_label_name, dst_label_name));
-    edge_label_to_index_[edge_label_name] = label_id;
 
     target = table->ReplaceSchemaMetadata(meta);
     return Status::OK();
